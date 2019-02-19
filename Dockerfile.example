@@ -1,0 +1,81 @@
+FROM alpine:3.9 as terraform-base
+RUN mkdir -p /install
+WORKDIR /install
+RUN apk add curl wget unzip
+ENV TERRAFORM_VERSION "0.11.11"
+RUN wget https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip -O /tmp/terraform.zip
+RUN unzip -o -d ./ /tmp/terraform.zip
+RUN chmod +x "./terraform"
+
+FROM python:3.5.6-stretch as ansible-base
+
+# Set build directory and Ansible version
+ENV ANSIBLE_VERSION 2.7.7
+RUN mkdir -p /install
+WORKDIR /install
+
+RUN pip3 --no-cache-dir install --install-option="--prefix=/install" ansible==${ANSIBLE_VERSION}
+
+FROM python:3.5.6-alpine3.9 as gcloud-base
+
+ARG CLOUD_SDK_VERSION=234.0.0
+ENV CLOUD_SDK_VERSION=$CLOUD_SDK_VERSION
+RUN apk --no-cache add \
+        curl \
+        bash \
+        libc6-compat \
+        openssh-client \
+        git \
+        gnupg \
+    && curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-${CLOUD_SDK_VERSION}-linux-x86_64.tar.gz && \
+    tar xzf google-cloud-sdk-${CLOUD_SDK_VERSION}-linux-x86_64.tar.gz
+RUN pwd
+RUN ls -l
+
+FROM python:3.5.6-alpine3.9
+# Add generic user
+#RUN addgroup -g 19999 builder && adduser -D -u 19999 -G builder builder
+
+# Fix python path
+RUN ln -s /usr/local/bin/python3 /usr/bin/python3
+
+# Copy Ansible and Terraform
+COPY --from=ansible-base /install /usr/local/
+COPY --from=terraform-base /install/terraform /usr/bin/
+COPY --from=gcloud-base /google-cloud-sdk /google-cloud-sdk
+
+# Set paths
+ENV PYTHONPATH /usr/local/lib/python3.5/site-packages
+ENV ANSIBLE_LIBRARY /usr/local/lib/python3.5/site-packages/ansible/library
+ENV ANSIBLE_GATHERING smart
+ENV ANSIBLE_HOST_KEY_CHECKING false
+ENV ANSIBLE_RETRY_FILES_ENABLED false
+ENV ANSIBLE_SSH_PIPELINING true
+# Set GCLOUD and ANSIBLE user
+ENV USER builder
+ENV ANSIBLE_REMOTE_USER builder
+ENV ANSIBLE_PRIVATE_KEY_FILE=~/.ssh/google_compute_engine
+
+# Add Ansible paths
+RUN set -x && \
+    echo "~~~ Adding basic hosts"  && \
+    mkdir -p /etc/ansible /ansible && \
+    echo "[local]" >> /etc/ansible/hosts && \
+    echo "localhost" >> /etc/ansible/hosts
+
+WORKDIR /ansible/playbooks
+
+# Add GCLOUD
+RUN apk --no-cache add \
+        openssh-client \
+        git
+ENV PATH /google-cloud-sdk/bin:$PATH
+RUN set -x && \
+    gcloud config set core/disable_usage_reporting true && \
+    gcloud config set component_manager/disable_update_check true && \
+    gcloud config set metrics/environment github_docker_image && \
+    gcloud --version
+
+#RUN apk add jq
+#ENTRYPOINT ["ansible-playbook"]
+#apk add jq && export GOOGLE_APPLICATION_CREDENTIALS=/.tfcreds

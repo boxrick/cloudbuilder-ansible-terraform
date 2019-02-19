@@ -1,0 +1,82 @@
+steps:
+# Copy encrypted ata from bucket to mount
+- name: 'gcr.io/cloud-builders/gsutil'
+  args: ['cp', 'gs://rick-test-cloudbuider-bucket/*', '/store/']
+  volumes:
+  - name: 'encrypted_store'
+    path: /store/
+
+# Decrypt ssh keyfile
+- name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - kms
+  - decrypt
+  - --ciphertext-file=/store/id_rsa.enc
+  - --plaintext-file=/root/id_rsa
+  - --location=global
+  - --keyring=rick-cloudbuild-test
+  - --key=github-key
+  - --project=GCPPROJECT
+  volumes:
+  - name: 'encrypted_store'
+    path: /store/
+  - name: 'root'
+    path: /root/
+
+# Decrypt service account key
+- name: 'gcr.io/cloud-builders/gcloud'
+  args:
+  - kms
+  - decrypt
+  - --ciphertext-file=/store/service_account.json.enc
+  - --plaintext-file=/root/service_account.json
+  - --location=global
+  - --keyring=rick-cloudbuild-test
+  - --key=github-key
+  - --project=GCPPROJECT
+  volumes:
+  - name: 'encrypted_store'
+    path: /store/
+  - name: 'root'
+    path: /root/
+
+# Set up git with key and domain and generate pubkey, link to default google ssh location
+- name: 'gcr.io/cloud-builders/git'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    mkdir -p /root/.ssh
+    mv /root/id_rsa /root/.ssh/id_rsa
+    chmod 600 /root/.ssh/id_rsa
+    ssh-keyscan github.com > /root/.ssh/known_hosts
+    ssh-keygen -y -f /root/.ssh/id_rsa > /root/.ssh/id_rsa.pub
+    ln -s /root/.ssh/id_rsa /root/.ssh/google_compute_engine
+    ln -s /root/.ssh/id_rsa.pub /root/.ssh/google_compute_engine.pub
+    mkdir -p /builder/home/.ssh
+    ln -s /root/.ssh/id_rsa /builder/home/.ssh/google_compute_engine
+    ln -s /root/.ssh/id_rsa.pub /builder/home/.ssh/google_compute_engine.pub
+  volumes:
+  - name: 'root'
+    path: /root/
+  - name: 'builder'
+    path: /builder/
+
+- name: 'eu.gcr.io/GCPPROJECT/ansible-terraform-gcloud'
+  entrypoint: 'sh'
+  args:
+      - '-c'
+      - |
+        gcloud auth activate-service-account --key-file=/root/service_account.json --project GCPPROJECT
+        gcloud compute config-ssh --project GCPPROJECT
+        #gcloud compute --project GCPPROJECT ssh --zone europe-west1-c EXAMPLE-SERVER --command whoami
+        ./pull-roles.sh
+        ansible-playbook playbooks/infrastructure/test.yml
+  volumes:
+  - name: 'root'
+    path: /root/
+  - name: 'builder'
+    path: /builder/
+  env:
+  - 'GOOGLE_APPLICATION_CREDENTIALS=/root/service_account.json'
+  - 'TERRAFORM_WORKSPACE=devopstest'
